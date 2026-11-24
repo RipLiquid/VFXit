@@ -1,6 +1,6 @@
 # VFXit
 
-VFXit (Visual Effects Exit) is a Windows desktop project for real-time webcam effects in meetings. This prototype renders the camera and a test transition on the GPU and publishes the output texture to OBS through Spout. The default output is **1080p at 60 fps**.
+VFXit (Visual Effects Exit) is a Windows desktop project for real-time webcam effects in meetings. It can hide the live camera behind a GPU-rendered smoke puff and reveal a still of the empty room. The default output is **1080p at 60 fps**.
 
 ## Run on Windows
 
@@ -18,11 +18,20 @@ The moving test pattern lets you check the renderer without a webcam or OBS. Omi
 | --- | --- |
 | `F1` | Toggle between 1080p and 720p output |
 | `F2` | Toggle between 60 and 30 fps output |
-| `Space` | Run the test transition |
-| `R` | Return to the live source |
+| `B` | Capture the empty room after a three-second countdown |
+| `Space` | Vanish in smoke and hold the captured background |
+| `R` | Return to live video or cancel a pending background capture |
 | `Esc` | Quit |
 
 Use `--resolution 720 --fps 30` to set the starting mode. The webcam negotiates its own capture mode when VFXit starts. A 30 fps webcam supplies up to 30 distinct camera frames per second even when VFXit renders at 60 fps.
+
+## Try the smoke effect
+
+1. Run VFXit with your webcam. With the preview focused, press `B` and step out of frame before the countdown ends. Wait for **Background captured** in the terminal.
+2. Sit back down and press `Space`. The smoke covers the switch to the empty-room frame. Press `R` to return to live video, including while the puff is playing.
+3. Capture the background again if the camera moves or the lighting changes. VFXit keeps the background in memory for the current session.
+
+In `--test-pattern` mode, press `Space` immediately to try the effect with a built-in reveal.
 
 ## Send the feed to a meeting
 
@@ -31,7 +40,7 @@ Use `--resolution 720 --fps 30` to set the starting mode. The webcam negotiates 
 3. If you are using the test pattern, check that the orange strip appears at the top. If it appears at the bottom, restart VFXit with `--flip-spout`.
 4. Match the OBS video resolution and frame rate to the VFXit output. Start **OBS Virtual Camera**, then select it as your camera in the meeting app.
 
-VFXit prints the active GPU, output frame rate, missed output deadlines, and Spout send errors. Use OBS and a second meeting participant to verify what the meeting receives.
+VFXit prints the active GPU, measured camera resolution and frame rate, output frame rate, missed output deadlines, and Spout send errors. In a test call, verify that the other participant sees motion in the live feed, the empty-room reveal, and the immediate return to live video.
 
 ## Fix `No module named 'cv2'` on Windows
 
@@ -48,4 +57,4 @@ If you launch VFXit with the **Run** button in VS Code, open the Command Palette
 
 ## Pipeline
 
-OpenCV captures webcam frames on a worker thread. The renderer pulls the newest available frame, uploads it once, and uses a GPU shader for scaling, colour conversion, and compositing. Spout shares the finished texture with OBS. The test transition provides a repeatable workload for measuring performance before adding hand tracking and selectable effects.
+OpenCV captures webcam frames on a worker thread. The renderer pulls the newest available frame, uploads it once, and uses GPU shaders for scaling, colour conversion, and the smoke transition. Spout shares the finished texture with OBS.

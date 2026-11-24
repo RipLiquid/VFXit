@@ -11,6 +11,8 @@ import moderngl
 
 
 GL_TEXTURE_2D = 0x0DE1
+BACKGROUND_DELAY = 3.0
+SMOKE_DURATION = 0.9
 VERTEX_SHADER = """
 #version 330
 out vec2 uv;
@@ -23,32 +25,69 @@ void main() {
 COMPOSITE_SHADER = """
 #version 330
 uniform sampler2D camera;
+uniform sampler2D background;
 uniform bool have_camera;
 uniform bool test_pattern;
 uniform float camera_aspect;
+uniform float background_aspect;
 uniform float output_aspect;
 uniform float time;
 uniform float transition;
 in vec2 uv;
 out vec4 color;
+
+vec3 camera_image(sampler2D image, float aspect) {
+    vec2 scale = max(vec2(output_aspect / aspect, aspect / output_aspect), vec2(1.0));
+    vec2 p = (uv - 0.5) * scale + 0.5;
+    if (any(lessThan(p, vec2(0.0))) || any(greaterThan(p, vec2(1.0)))) {
+        return vec3(0.025, 0.035, 0.055);
+    }
+    return texture(image, vec2(p.x, 1.0 - p.y)).bgr;
+}
+
+float hash(vec2 cell) {
+    return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float noise(vec2 point) {
+    vec2 cell = floor(point);
+    vec2 f = smoothstep(vec2(0.0), vec2(1.0), fract(point));
+    return mix(mix(hash(cell), hash(cell + vec2(1, 0)), f.x),
+               mix(hash(cell + vec2(0, 1)), hash(cell + vec2(1, 1)), f.x), f.y);
+}
+
 void main() {
     vec3 live = vec3(0.025, 0.035, 0.055);
-    if (test_pattern) {
+    // Replace the camera behind the fully opaque part of the puff.
+    const float swap_time = 0.42;
+    if (transition >= swap_time) {
+        live = test_pattern
+            ? vec3(0.05, 0.10, 0.17) + vec3(0.04, 0.12, 0.13) * uv.y
+            : camera_image(background, background_aspect);
+    } else if (test_pattern) {
         vec3 bars = 0.53 + 0.32 * cos(floor(uv.x * 8.0) + vec3(0, 2, 4));
         float marker = 1.0 - step(0.025, abs(uv.x - fract(time * 0.5)));
         live = mix(bars * (0.35 + uv.y * 0.65), vec3(1.0), marker);
         if (uv.y > 0.92) live = vec3(0.95, 0.32, 0.12);
     } else if (have_camera) {
-        vec2 scale = max(vec2(output_aspect / camera_aspect,
-                              camera_aspect / output_aspect), vec2(1.0));
-        vec2 p = (uv - 0.5) * scale + 0.5;
-        if (all(greaterThanEqual(p, vec2(0.0))) && all(lessThanEqual(p, vec2(1.0)))) {
-            live = texture(camera, vec2(p.x, 1.0 - p.y)).bgr;
-        }
+        live = camera_image(camera, camera_aspect);
     }
-    vec3 reveal = vec3(0.05, 0.10, 0.17) + vec3(0.04, 0.12, 0.13) * uv.y;
-    float sweep = smoothstep(-0.025, 0.025, transition * 1.06 - 0.03 - uv.x);
-    color = vec4(mix(live, reveal, sweep), 1.0);
+
+    if (transition > 0.0 && transition < 1.0) {
+        vec2 p = (uv - 0.5) * vec2(output_aspect, 1.0);
+        p.y -= 0.13 * transition;
+        float clouds = 0.65 * noise(p * 9.0 - vec2(0, transition * 4.0))
+                     + 0.35 * noise(p * 22.0 - vec2(0, transition * 6.0));
+        float growth = smoothstep(0.0, swap_time, transition);
+        float fade = smoothstep(swap_time, 1.0, transition);
+        float radius = mix(0.04, 1.36, growth) + 0.2 * fade;
+        float edge = radius - length(p) + 0.20 * (clouds - 0.5);
+        float opacity = smoothstep(-0.07, 0.08, edge)
+                      * smoothstep(0.0, 0.09, transition) * (1.0 - fade);
+        vec3 smoke = mix(vec3(0.44, 0.49, 0.56), vec3(0.99, 0.98, 0.93), clouds);
+        live = mix(live, smoke, opacity);
+    }
+    color = vec4(live, 1.0);
 }
 """
 PREVIEW_SHADER = """
@@ -75,24 +114,26 @@ class Camera:
             for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF):
                 device = cv2.VideoCapture(index, backend)
                 if device.isOpened():
-                    break
+                    device.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                    device.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                    device.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                    device.set(cv2.CAP_PROP_FPS, fps)
+                    ok, frame = device.read()
+                    if ok and frame is not None and frame.size:
+                        break
                 device.release()
             else:
-                self.error = f"Could not open webcam {index}. Check permissions or use --camera."
+                self.error = (f"No frames from webcam {index} via DirectShow or Media Foundation. "
+                              "Check Windows camera access, close other camera apps, or use --camera.")
                 return
-            device.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            device.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            device.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            device.set(cv2.CAP_PROP_FPS, fps)
+            print(f"Webcam {index} via {device.getBackendName()}: "
+                  f"{frame.shape[1]}x{frame.shape[0]}, driver reports "
+                  f"{device.get(cv2.CAP_PROP_FPS):g} fps", flush=True)
             frames = 0
             start = perf_counter()
             input_fps = 0.0
             sequence = 0
             while not self.stop.is_set():
-                ok, frame = device.read()
-                if not ok:
-                    self.error = "Webcam stopped delivering frames. Check the connection and restart."
-                    return
                 sequence += 1
                 frames += 1
                 elapsed = perf_counter() - start
@@ -102,6 +143,11 @@ class Camera:
                     start = perf_counter()
                 with self.lock:
                     self.latest = (sequence, frame, input_fps)
+                ok, frame = device.read()
+                if not ok or frame is None or not frame.size:
+                    if not self.stop.is_set():
+                        self.error = "Webcam stopped delivering frames. Check the connection and restart."
+                    return
         except cv2.error as error:
             self.error = f"Webcam error: {error}"
         finally:
@@ -144,11 +190,16 @@ def run(args):
         composite_quad = context.vertex_array(composite, [])
         preview_quad = context.vertex_array(preview, [])
         camera_texture = context.texture((1, 1), 3)
+        background_texture = context.texture((1, 1), 3)
         output_texture = None
         output_buffer = None
         width, height = (1920, 1080) if args.resolution == 1080 else (1280, 720)
         fps = args.fps
         transition_start = None
+        capture_at = None
+        background_ready = args.test_pattern
+        composite["camera"].value = 0
+        composite["background"].value = 1
 
         if not args.preview_only:
             import SpoutGL
@@ -161,22 +212,34 @@ def run(args):
             camera = Camera(args.camera, width, height, args.fps)
 
         def on_key(key_window, key, scancode, action, mods):
-            nonlocal width, height, fps, transition_start
+            nonlocal width, height, fps, transition_start, capture_at
             if action != glfw.PRESS:
                 return
             if key == glfw.KEY_F1:
                 width, height = (1280, 720) if height == 1080 else (1920, 1080)
             elif key == glfw.KEY_F2:
                 fps = 30 if fps == 60 else 60
+            elif key == glfw.KEY_B and camera is not None:
+                if transition_start is not None:
+                    print("Return live with R before capturing a background.", flush=True)
+                else:
+                    capture_at = perf_counter() + BACKGROUND_DELAY
+                    print("Capturing the background in 3 seconds. Step out of frame.", flush=True)
             elif key == glfw.KEY_SPACE:
-                transition_start = perf_counter()
+                if capture_at is not None:
+                    print("Wait for the background capture to finish.", flush=True)
+                elif not background_ready:
+                    print("Press B to capture the empty room first.", flush=True)
+                elif transition_start is None:
+                    transition_start = perf_counter()
             elif key == glfw.KEY_R:
                 transition_start = None
+                capture_at = None
             elif key == glfw.KEY_ESCAPE:
                 glfw.set_window_should_close(key_window, True)
 
         glfw.set_key_callback(window, on_key)
-        print("F1 resolution | F2 frame rate | Space test transition | R return live | Esc quit", flush=True)
+        print("F1 resolution | F2 frame rate | B capture background | Space vanish | R return live/cancel capture | Esc quit", flush=True)
         start = last_report = deadline = perf_counter()
         sequence = rendered = missed = failed_sends = 0
         input_fps = 0.0
@@ -214,6 +277,14 @@ def run(args):
                         camera_texture = context.texture((frame_width, frame_height), 3)
                     camera_texture.write(memoryview(frame), alignment=1)
                     sequence = frame_sequence
+                if capture_at is not None and now >= capture_at and frame is not None:
+                    if background_texture.size != camera_texture.size:
+                        background_texture.release()
+                        background_texture = context.texture(camera_texture.size, 3)
+                    background_texture.write(memoryview(frame), alignment=1)
+                    capture_at = None
+                    background_ready = True
+                    print("Background captured. Press Space to vanish.", flush=True)
 
             if output_texture is None or output_texture.size != (width, height):
                 if output_buffer is not None:
@@ -225,13 +296,15 @@ def run(args):
             output_buffer.use()
             context.viewport = (0, 0, width, height)
             camera_texture.use(location=0)
-            composite["camera"].value = 0
+            background_texture.use(location=1)
             composite["test_pattern"].value = args.test_pattern
             composite["have_camera"].value = sequence > 0
             composite["camera_aspect"].value = camera_texture.width / camera_texture.height
+            composite["background_aspect"].value = background_texture.width / background_texture.height
             composite["output_aspect"].value = width / height
             composite["time"].value = now - start
-            composite["transition"].value = 0.0 if transition_start is None else min(1.0, (now - transition_start) / 0.65)
+            transition = 0.0 if transition_start is None else min(1.0, (now - transition_start) / SMOKE_DURATION)
+            composite["transition"].value = transition
             composite_quad.render(moderngl.TRIANGLES, vertices=3)
 
             if sender is not None:
@@ -264,11 +337,17 @@ def run(args):
             worst_ms = max(worst_ms, (finished - now) * 1000)
             elapsed = finished - last_report
             if elapsed >= 1.0:
-                source = "test pattern" if args.test_pattern else f"camera {input_fps:.1f} fps"
+                source = "test pattern" if args.test_pattern else f"camera {camera_texture.width}x{camera_texture.height} {input_fps:.1f} measured fps"
                 report = f"{width}x{height}@{fps} | {source} | output {rendered / elapsed:.1f} fps | missed {missed} | worst render loop {worst_ms:.1f} ms"
                 if sender is not None:
                     report += f" | Spout send errors {failed_sends}"
-                glfw.set_window_title(window, f"VFXit Output | {report}")
+                if capture_at is not None:
+                    status = f"Capturing background in {max(0, capture_at - now):.1f}s"
+                elif transition_start is not None:
+                    status = "Vanished" if transition >= 1.0 else "Smoke transition"
+                else:
+                    status = "Live | Background ready" if background_ready else "Live | Press B to capture background"
+                glfw.set_window_title(window, f"VFXit Output | {status} | {report}")
                 print(report, flush=True)
                 last_report = finished
                 rendered = missed = failed_sends = 0
